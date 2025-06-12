@@ -1,0 +1,11 @@
+ - actor
+    - whatever shape in
+    - continuous out in pairs, then sample
+    - backprop thru reparamaterization trick or just thru distribution
+    - gradient ascent on target: A2C J(theta) + entropy
+        - entropy is standard form for normals
+ - critic
+    - same thing in
+    - single out
+    - gra
+ - buffer? i think not
