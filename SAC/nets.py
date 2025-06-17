@@ -15,15 +15,15 @@ class MLP(nn.Module):
         self.nn = nn.ModuleList()
 
         self.nn.append(nn.Linear(input_shape, layer_size))
+        self.nn.append(activation())
         if batchnorm:
             self.nn.append(nn.BatchNorm1d(layer_size))
-        self.nn.append(activation())
 
-        for _ in range(hidden_layers - 2):
+        for _ in range(hidden_layers):
             self.nn.append(nn.Linear(layer_size, layer_size))
+            self.nn.append(activation())
             if batchnorm:
                 self.nn.append(nn.BatchNorm1d(layer_size))
-            self.nn.append(activation())
 
         self.nn.append(nn.Linear(layer_size, output_shape))
         self.nn.append(act_last())
@@ -34,16 +34,22 @@ class MLP(nn.Module):
         return x
     
 class ActorNet(nn.Module):
-    def __init__(self, input_shape, actions: int, hidden_layers=2, layer_size=64, activation=nn.ELU):
+    def __init__(self, input_shape, actions: int, hidden_layers=2, layer_size=64, activation=nn.ELU, continuous=True):
         super(ActorNet, self).__init__()
-        self.mean_net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Tanh, batchnorm=True)
-        self.std_net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=utils.ScaledSigmoid, batchnorm=True)
+        self.continuous = continuous
+        if continuous:
+            self.mean_net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=True)
+            self.std_net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=True)
+        else:
+            self.net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Softmax, batchnorm=True)
 
     def forward(self, x):
-        mean = self.mean_net(x)
-    
-        std = self.std_net(x)
-        return mean, std
+        if self.continuous:
+            mean = self.mean_net(x)
+            std = self.std_net(x)
+            return mean, std
+        else:
+            return self.net(x), None
     
 class QNet(nn.Module):
     def __init__(self, input_shape, actions: int, hidden_layers=2, layer_size=64, activation=nn.ELU):

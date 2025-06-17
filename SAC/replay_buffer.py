@@ -11,8 +11,11 @@ class ReplayBuffer:
 
     def reset(self):
         self.states = torch.zeros((self.buffer_size, cfg.input_shape), dtype=self.dtype, requires_grad=False)
-        self.actions = torch.zeros((self.buffer_size, cfg.actions), dtype=self.dtype, requires_grad=False)
-        self.rewards = torch.zeros((self.buffer_size, 1), dtype=self.dtype, requires_grad=False)
+        if cfg.continuous:
+            self.actions = torch.zeros((self.buffer_size, cfg.actions), dtype=self.dtype, requires_grad=False)
+        else:
+            self.actions = torch.zeros((self.buffer_size, 1), dtype=torch.long, requires_grad=False)
+        self.rewards = torch.zeros((self.buffer_size), dtype=self.dtype, requires_grad=False)
         self.next_states = torch.zeros((self.buffer_size, cfg.input_shape), dtype=self.dtype, requires_grad=False)
         self.dones = torch.zeros((self.buffer_size, 1), dtype=self.dtype, requires_grad=False)
         
@@ -29,6 +32,13 @@ class ReplayBuffer:
         self.index = (self.index + 1) % self.buffer_size
         if self.size < self.buffer_size:
             self.size += 1
+
+    def no_grad(self):
+        self.states = self.states.detach()
+        self.actions = self.actions.detach()
+        self.rewards = self.rewards.detach()
+        self.next_states = self.next_states.detach()
+        self.dones = self.dones.detach()
 
     def sample(self, batch_size: int):
         indices = np.random.choice(self.size, batch_size, replace=False)
