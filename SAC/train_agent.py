@@ -27,13 +27,15 @@ writer = SummaryWriter(cfg.tensorboard_log_dir)
 agent = Agent(input_shape=cfg.input_shape, actions=cfg.actions,
               hidden_layers=cfg.hidden_layers, layer_size=cfg.layer_size, activation=cfg.activation)
 trainer = Trainer(agent, gamma=cfg.gamma, lr=cfg.lr, alpha=cfg.alpha)
-trainer.load(cwd + cfg.save_path)       
+# trainer.load(cwd + cfg.save_path)       
 
 # writer.add_graph(agent.actor, torch.zeros((1, cfg.input_shape), dtype=torch.float32))
 
-env = gymnasium.make("Ant-v5", render_mode="human")
+# env = gymnasium.make("Ant-v5", render_mode="human")
 # env = gymnasium.make("Pendulum-v1", render_mode="human")
 # env = gymnasium.make("CartPole-v1", render_mode="human")
+env = gymnasium.make("InvertedDoublePendulum-v5", render_mode="human")
+# env = gymnasium.make("Walker2d-v5", render_mode="human")
 env.metadata['render_fps'] = 9999
 
 state, info = env.reset()
@@ -92,7 +94,7 @@ while True:
         #     writer.add_scalar(f'Actions/action_{act}/mean', pp(act_mean[:, act]), running_steps)
         #     writer.add_scalar(f'Actions/action_{act}/std', pp(act_std[:, act]), running_steps)
 
-    if (running_steps + 1) % cfg.save_freq == 0:
-        trainer.save(cwd + cfg.save_path)
-        trainer.save(cwd + cfg.backup_path)
-        print(f"Model saved at step {running_steps}")
+    # if (running_steps + 1) % cfg.save_freq == 0:
+    #     trainer.save(cwd + cfg.save_path)
+    #     trainer.save(cwd + cfg.backup_path)
+    #     print(f"Model saved at step {running_steps}")
