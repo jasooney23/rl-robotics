@@ -17,19 +17,22 @@ class Trainer:
         params = []
         for net in agent.nets:
             params += list(net.parameters())
-        self.optimizer = torch.optim.Adam(params, lr=lr)
+        self.q_optim = torch.optim.Adam(list(agent.q1.parameters()) + list(agent.q2.parameters()), lr=lr, weight_decay=cfg.l2_reg_q)
+        self.actor_optim = torch.optim.Adam(agent.actor.parameters(), lr=lr, weight_decay=cfg.l2_reg_actor)
 
         self.replay_buffer = ReplayBuffer(buffer_size=buffer_size, dtype=buffer_dtype)
         self.batch_size = batch_size
 
-    def save(self, path: str):
+    def save(self, path: str, train_info=None):
         self.agent.save(path)
         torch.save(self.replay_buffer, path + "replay_buffer.pt")
+        torch.save(train_info, path + "train_info.pt")
 
     def load(self, path: str):
         self.agent.load(path)
-        self.replay_buffer = torch.load(path + "replay_buffer.pt")
+        self.replay_buffer = torch.load(path + "replay_buffer.pt", weights_only=False)
         self.replay_buffer.no_grad()
+        return torch.load(path + "train_info.pt", weights_only=False)
 
     def loss_A2C(self, states, actions, rewards, transitions, dones):
         # s_t
@@ -70,55 +73,68 @@ class Trainer:
 
         return loss, losses
     
-    def loss_SAC(self, states, actions, rewards, transitions, dones):
+    def loss_SAC(self, states_replay, actions_replay, rewards_replay, transitions_replay, dones_replay):
+        comb_states = torch.cat([states_replay, transitions_replay], dim=0)
         if cfg.continuous:
-            actions_next, act_mean_next, act_std_next = self.agent.get_action(transitions, scale=False)
-            act_unclamped_next = torch.tanh(actions_next)
-            act_unclamped_probs_next = torch.exp(-0.5 * ((act_unclamped_next - act_mean_next) / act_std_next) ** 2) \
-                / (act_std_next * np.sqrt(2 * np.pi))  # to avoid log(0)
+            acts, means, stds = self.agent.get_action(comb_states, clamp=False)
+            actions_next, act_mean_next, act_std_next = acts[cfg.batch_size:], means[cfg.batch_size:], stds[cfg.batch_size:]
+            actions_curr, act_mean_curr, act_std_curr = acts[:cfg.batch_size], means[:cfg.batch_size], stds[:cfg.batch_size]
+
+            act_unclamped_next = actions_next
+            actions_next = torch.tanh(actions_next)
+            act_unclamped_probs_next = torch.exp(-0.5 * ((act_unclamped_next - act_mean_next) / act_std_next) ** 2) / (act_std_next * np.sqrt(2 * np.pi))
             act_logprobs_next = torch.log(act_unclamped_probs_next + cfg.eps) - torch.sum(torch.log(1 - actions_next ** 2 + cfg.eps), dim=-1, keepdim=True)
 
-            curr_actions, curr_act_mean, curr_act_std = self.agent.get_action(states, scale=False)
-            curr_act_unclamped = torch.tanh(curr_actions)
-            curr_act_unclamped_probs = torch.exp(-0.5 * ((curr_act_unclamped - curr_act_mean) / curr_act_std) ** 2) \
-                / (curr_act_std * np.sqrt(2 * np.pi))  # to avoid log(0)
-            curr_logprobs_next = torch.log(curr_act_unclamped_probs + cfg.eps) - torch.sum(torch.log(1 - curr_actions ** 2 + cfg.eps), dim=-1, keepdim=True)
+            act_unclamped_curr = actions_curr
+            actions_curr = torch.tanh(actions_curr)
+            act_unclamped_probs_curr = torch.exp(-0.5 * ((act_unclamped_curr - act_mean_curr) / act_std_curr) ** 2) /(act_std_curr * np.sqrt(2 * np.pi))
+            act_logprobs_curr = torch.log(act_unclamped_probs_curr + cfg.eps) - torch.sum(torch.log(1 - actions_curr ** 2 + cfg.eps), dim=-1, keepdim=True)
+
         else:
-            actions_next, act_probs_next, _ = self.agent.get_action(transitions)
-            actions_next = nn.functional.one_hot(actions_next.squeeze(), num_classes=cfg.actions).float()
+            acts, probs, _ = self.agent.get_action(comb_states)
+            actions_next, act_probs_next = acts[cfg.batch_size:], probs[cfg.batch_size:]
+            actions_curr, curr_act_probs = acts[:cfg.batch_size], probs[:cfg.batch_size]
+
+            # actions_next, act_probs_next, _ = self.agent.get_action(transitions_replay)
+            actions_next = nn.functional.one_hot(actions_next.squeeze(), num_classes=cfg.actions_replay).float()
             act_probs_next = actions_next * act_probs_next + cfg.eps
 
-            curr_actions, curr_act_probs, _ = self.agent.get_action(states)
-            curr_actions = nn.functional.one_hot(curr_actions.squeeze(), num_classes=cfg.actions).float()
-            curr_act_probs = curr_actions * curr_act_probs + cfg.eps
+            # actions_curr, curr_act_probs, _ = self.agent.get_action(states_replay)
+            actions_curr = nn.functional.one_hot(actions_curr.squeeze(), num_classes=cfg.actions_replay).float()
+            curr_act_probs = actions_curr * curr_act_probs + cfg.eps
 
-            actions = nn.functional.one_hot(actions.squeeze(), num_classes=cfg.actions).float()
+            actions_replay = nn.functional.one_hot(actions_replay.squeeze(), num_classes=cfg.actions_replay).float()
 
-        q1_target = self.agent.q1_target(transitions, actions_next)
-        q2_target = self.agent.q2_target(transitions, actions_next)
-        q_target = torch.min(q1_target, q2_target)
-        expected_return = (rewards.unsqueeze(-1) + self.gamma * (1-dones) * (q_target - self.alpha * act_logprobs_next)).detach()
+        # august 10: added detach to actor_target = (q.detach() - self.alpha * act_logprobs_curr)
+        # august 12: changed to instead work through different optimizers
 
-        critic_loss = (self.agent.q1(states, actions) - expected_return) ** 2 
+        comb_act = torch.cat([actions_curr, actions_replay], dim=0)
+        dup_states = torch.cat([states_replay, states_replay], dim=0)  # duplicate states for batch size compatibility
+        q1 = self.agent.q1(dup_states, comb_act)
+        q2 = self.agent.q2(dup_states, comb_act)
+        q = torch.min(q1[:cfg.batch_size], q2[:cfg.batch_size])
 
-        q1 = self.agent.q1(states, curr_actions)
-        q2 = self.agent.q2(states, curr_actions)
-        q = torch.min(q1, q2)
+        q_target = torch.min(self.agent.q1_target(transitions_replay, actions_next), self.agent.q2_target(transitions_replay, actions_next))
 
-        actor_target = (q - self.alpha * curr_logprobs_next)
-
-        actor_target = -actor_target.mean()
+        expected_return = (rewards_replay.unsqueeze(-1) + self.gamma * (1-dones_replay) * (q_target - self.alpha * act_logprobs_next)).detach() # can keep detach here as this won't have grads anyway
+        critic_loss = (q1[cfg.batch_size:] - expected_return) ** 2 + (q2[cfg.batch_size:] - expected_return) ** 2
         critic_loss = critic_loss.mean()
 
-        loss = actor_target + critic_loss
-        losses = dict(
-            actor=actor_target.item(),
+        actor_target = (q - self.alpha * act_logprobs_curr)
+        actor_loss = -actor_target.mean()
+
+        metrics = dict(
+            actor=actor_loss.item(),
             critic=critic_loss.item(),
+            avg_std=act_std_curr.mean().item(),
+            avg_mean=act_mean_curr.mean().item(),
+            max_std=act_std_curr.max().item(),
+            max_abs_mean=act_mean_curr.abs().max().item(),
+
             actor_ent=0  # SAC does not have actor entropy loss
         )
-        if torch.isnan(loss).any():
-            raise ValueError("NaN detected in actions")
-        return loss, losses, 
+
+        return actor_loss, critic_loss, metrics
 
     def add_to_buffer(self, state, action, reward, next_state, done):
         self.replay_buffer.add(
@@ -133,32 +149,42 @@ class Trainer:
         self.agent.set_train()
 
         if self.replay_buffer.size < cfg.buffer_min_size * self.replay_buffer.buffer_size:
-            return 0, dict(actor=0, critic=0, actor_ent=0)
+            return 0, dict( actor=0, critic=0, actor_ent=0, avg_std=0, avg_mean=0, max_std=0, max_abs_mean=0)
 
-        self.optimizer.zero_grad()
         states, actions, rewards, transitions, dones = self.replay_buffer.sample(self.batch_size)
-        loss, losses = self.loss_SAC(states, actions, rewards, transitions, dones)
-        loss.backward()
-        for net in self.agent.nets:
-            nn.utils.clip_grad_norm_(net.parameters(), cfg.gradnorm_clip)
-        self.optimizer.step()
-        act, act_mean, act_std = self.agent.get_action(states)
-        if torch.isnan(act).any():
-            raise ValueError("NaN detected in actions")
-        self.agent.update_target_nets(cfg.critic_ema_tau)
+        actor_loss, critic_loss, metrics = self.loss_SAC(states, actions, rewards, transitions, dones)
+        
+        self.q_optim.zero_grad()
+        critic_loss.backward(retain_graph=True)
+        self.q_optim.step()
 
-        return loss.item(), losses
-    
+        self.actor_optim.zero_grad()
+        actor_loss.backward()  # retain graph as critic_loss also needs it
+        self.actor_optim.step()
+
+        # for net in self.agent.nets:
+        #     nn.utils.clip_grad_norm_(net.parameters(), cfg.gradnorm_clip)
+
+
+        # action, act_mean, act_std = self.agent.get_action(torch.randn_like(states)) # +++
+        # if action.isnan().any():
+        #     a = 1
+
+        self.agent.update_target_nets(cfg.critic_ema_tau)
+        return (actor_loss + critic_loss).item(), metrics
+
     def train(self):
         total_loss = 0
-        losses = dict(actor=0, critic=0, actor_ent=0)
+        metrics = {}
         for i in range(cfg.train_steps_per_update):
-            total_loss_i, losses_i = self.train_step()
+            total_loss_i, metrics_i = self.train_step()
+            if i == 0:
+                metrics = {key: value for key, value in metrics_i.items()}
+            else:
+                for key in metrics:
+                    metrics[key] += metrics_i[key]
             total_loss += total_loss_i
-            for key in losses:
-                losses[key] += losses_i[key]
-
         total_loss /= cfg.train_steps_per_update
-        for key in losses:
-            losses[key] /= cfg.train_steps_per_update
-        return total_loss, losses
+        for key in metrics:
+            metrics[key] /= cfg.train_steps_per_update
+        return total_loss, metrics
