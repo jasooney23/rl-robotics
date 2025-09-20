@@ -38,10 +38,10 @@ class ActorNet(nn.Module):
         super(ActorNet, self).__init__()
         self.continuous = continuous
         if continuous:
-            self.mean_net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=True)
-            self.std_net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=True)
+            self.mean_net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=False)
+            self.std_net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=False)
         else:
-            self.net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Softmax, batchnorm=True)
+            self.net = MLP(input_shape, actions, hidden_layers, layer_size, activation, act_last=nn.Softmax, batchnorm=False)
 
     def forward(self, x):
         if self.continuous:
@@ -54,7 +54,7 @@ class ActorNet(nn.Module):
 class QNet(nn.Module):
     def __init__(self, input_shape, actions: int, hidden_layers=2, layer_size=64, activation=nn.ELU):
         super(QNet, self).__init__()
-        self.q_net = MLP(input_shape + actions, 1, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=True)
+        self.q_net = MLP(input_shape + actions, 1, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=False)
 
     def forward(self, s, a):
         return self.q_net(torch.cat([s, a], dim=-1))
@@ -63,7 +63,7 @@ class ValueNet(nn.Module):
     def __init__(self, input_shape, hidden_layers=2, layer_size=64, activation=nn.ELU):
         # stabilized: use moving average for parameters, similar in goal to static target networks
         super(ValueNet, self).__init__()
-        self.net = MLP(input_shape, 1, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=True)
+        self.net = MLP(input_shape, 1, hidden_layers, layer_size, activation, act_last=nn.Identity, batchnorm=False)
 
     def forward(self, x):
         return self.net(x)

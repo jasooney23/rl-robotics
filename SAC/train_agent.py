@@ -1,14 +1,23 @@
 '''Soft Actor-Critic (SAC), 2018'''
-
-
-import torch, numpy as np, config as cfg, gymnasium
+import torch, numpy as np, config as cfg, gymnasium, argparse
 from torch import nn as nn
+
+''' set yourself up for success '''
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("PYTORCH DEVICE: ", device)
 torch.set_default_device(device)
 np.set_printoptions(precision=2)
 
-import os
+
+''' parse commandline args'''
+parser = argparse.ArgumentParser()
+parser.add_argument("--nogui", action="store_true", help="Run without GUI")
+parser.add_argument("--reset", action="store_true", help="Don't load saved model")
+args = parser.parse_args()
+
+
+''' needed for debugging with torchviz '''
+import os, shutil
 os.environ["PATH"] += os.pathsep + 'C:\\Program Files\\Graphviz\\bin'
 cwd = os.getcwd() + "/"
 
@@ -16,13 +25,7 @@ from agent import Agent
 from trainer import Trainer
 
 
-'''Setup TensorBoard'''
-from torch.utils.tensorboard import SummaryWriter
-
-writer = SummaryWriter(cfg.tensorboard_log_dir)
-
 '''Train code'''
-
 agent = Agent(input_shape=cfg.input_shape, actions=cfg.actions,
               hidden_layers=cfg.hidden_layers, layer_size=cfg.layer_size, activation=cfg.activation)
 trainer = Trainer(agent, gamma=cfg.gamma, lr=cfg.lr, alpha=cfg.alpha)
@@ -31,13 +34,22 @@ running_steps = 0
 ep = 0
 
 train_info = None
-# train_info = trainer.load(cwd + cfg.save_path)
-running_steps = train_info["running_steps"] if train_info else 0
-ep = train_info["ep"] if train_info else 0
+if args.reset:
+    shutil.rmtree(cwd + cfg.tensorboard_log_dir, ignore_errors=True)
+    # old save gets overwritten anyway so no need to delete
+    running_steps = 0
+    ep = 0
+else:
+    train_info = trainer.load(cwd + cfg.save_path)
+    running_steps = train_info["running_steps"]
+    ep = train_info["ep"]
+# setup tensorboard
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter(cfg.tensorboard_log_dir)
 
-writer.add_graph(agent.actor, torch.zeros((1, cfg.input_shape), dtype=torch.float32))
 
-env = gymnasium.make("Swimmer-v5", render_mode="human")
+''' set up environment '''
+env = gymnasium.make("Humanoid-v5", render_mode=None if args.nogui else "human")
 env.metadata['render_fps'] = 0
 
 state, info = env.reset()
@@ -47,6 +59,8 @@ ep_return = 0
 time_fin = time_init = 0
 step = 0
 
+
+''' Main train loop'''
 while True:
     action, act_mean, act_std = agent.get_action(state) # +++
     if action.isnan().any():
@@ -72,7 +86,7 @@ while True:
     if step % cfg.print_freq == 0:
         pp = lambda x: x.squeeze().detach().cpu().numpy()
         if cfg.continuous:
-            print(f"Step: {step}, Action: {action}, Mean: {pp(act_mean)}, Std: {pp(act_std)}, Reward: {reward.item():.2f}, Loss: {total_loss:.2f}, Loss_Act: {metrics['actor']:.2f}, Loss_Critic: {metrics['critic']:.2f} Avg std: {metrics['avg_std']:.2f}, Avg mean: {metrics['avg_mean']:.2f}, Max std: {metrics['max_std']:.2f}, Max abs mean: {metrics['max_abs_mean']:.2f}, ")
+            print(f"Step: {step}, Action: {action}, Mean: {pp(act_mean)}, Std: {pp(act_std)}, Reward: {reward:.2f}, Loss: {total_loss:.2f}, Loss_Act: {metrics['actor']:.2f}, Loss_Critic: {metrics['critic']:.2f} Avg std: {metrics['avg_std']:.2f}, Avg mean: {metrics['avg_mean']:.2f}, Max std: {metrics['max_std']:.2f}, Max abs mean: {metrics['max_abs_mean']:.2f}, ")
             pass
         else:
             # target_critic_val = agent.target_critic((state, nn.functional.one_hot(action, num_classes=cfg.actions).float()))
@@ -103,5 +117,5 @@ while True:
             "ep": ep,
         }
         trainer.save(cwd + cfg.save_path, train_info)
-        trainer.save(cwd + cfg.backup_path, train_info)
+        trainer.save(cwd + cfg.save_path + "backup/", train_info)
         print(f"Model saved at step {running_steps}")

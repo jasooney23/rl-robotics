@@ -74,14 +74,14 @@ class Trainer:
         return loss, losses
     
     def loss_SAC(self, states_replay, actions_replay, rewards_replay, transitions_replay, dones_replay):
-        comb_states = torch.cat([states_replay, transitions_replay], dim=0)
+        actions_replay = actions_replay / cfg.max_action  # scale action back to -1 to 1 range for training
+
         if cfg.continuous:
-            acts, means, stds = self.agent.get_action(comb_states, clamp=False)
-            actions_next, act_mean_next, act_std_next = acts[cfg.batch_size:], means[cfg.batch_size:], stds[cfg.batch_size:]
-            actions_curr, act_mean_curr, act_std_curr = acts[:cfg.batch_size], means[:cfg.batch_size], stds[:cfg.batch_size]
+            actions_next, act_mean_next, act_std_next = self.agent.get_action(transitions_replay, clamp=False)
+            actions_curr, act_mean_curr, act_std_curr = self.agent.get_action(states_replay, clamp=False)
 
             act_unclamped_next = actions_next
-            actions_next = torch.tanh(actions_next)
+            actions_next = torch.tanh(actions_next) # don't multiply; from perspective of agent, action space is -1 to 1. scale only when passing to env
             act_unclamped_probs_next = torch.exp(-0.5 * ((act_unclamped_next - act_mean_next) / act_std_next) ** 2) / (act_std_next * np.sqrt(2 * np.pi))
             act_logprobs_next = torch.log(act_unclamped_probs_next + cfg.eps) - torch.sum(torch.log(1 - actions_next ** 2 + cfg.eps), dim=-1, keepdim=True)
 
@@ -91,6 +91,7 @@ class Trainer:
             act_logprobs_curr = torch.log(act_unclamped_probs_curr + cfg.eps) - torch.sum(torch.log(1 - actions_curr ** 2 + cfg.eps), dim=-1, keepdim=True)
 
         else:
+            '''ignore this lol'''
             acts, probs, _ = self.agent.get_action(comb_states)
             actions_next, act_probs_next = acts[cfg.batch_size:], probs[cfg.batch_size:]
             actions_curr, curr_act_probs = acts[:cfg.batch_size], probs[:cfg.batch_size]
@@ -108,20 +109,26 @@ class Trainer:
         # august 10: added detach to actor_target = (q.detach() - self.alpha * act_logprobs_curr)
         # august 12: changed to instead work through different optimizers
 
-        comb_act = torch.cat([actions_curr, actions_replay], dim=0)
-        dup_states = torch.cat([states_replay, states_replay], dim=0)  # duplicate states for batch size compatibility
-        q1 = self.agent.q1(dup_states, comb_act)
-        q2 = self.agent.q2(dup_states, comb_act)
-        q = torch.min(q1[:cfg.batch_size], q2[:cfg.batch_size])
-
+        q1_replay = self.agent.q1(states_replay, actions_replay)
+        q2_replay = self.agent.q2(states_replay, actions_replay)
         q_target = torch.min(self.agent.q1_target(transitions_replay, actions_next), self.agent.q2_target(transitions_replay, actions_next))
-
         expected_return = (rewards_replay.unsqueeze(-1) + self.gamma * (1-dones_replay) * (q_target - self.alpha * act_logprobs_next)).detach() # can keep detach here as this won't have grads anyway
-        critic_loss = (q1[cfg.batch_size:] - expected_return) ** 2 + (q2[cfg.batch_size:] - expected_return) ** 2
+        critic_loss = (q1_replay - expected_return) ** 2 + (q2_replay - expected_return) ** 2
         critic_loss = critic_loss.mean()
 
-        actor_target = (q - self.alpha * act_logprobs_curr)
+        self.q_optim.zero_grad()
+        critic_loss.backward()
+        self.q_optim.step()
+
+        q1_curr = self.agent.q1(states_replay, actions_curr)
+        q2_curr = self.agent.q2(states_replay, actions_curr)
+        q_curr = torch.min(q1_curr, q2_curr)
+        actor_target = (q_curr - self.alpha * act_logprobs_curr)
         actor_loss = -actor_target.mean()
+
+        self.actor_optim.zero_grad()
+        actor_loss.backward()
+        self.actor_optim.step()
 
         metrics = dict(
             actor=actor_loss.item(),
@@ -153,22 +160,6 @@ class Trainer:
 
         states, actions, rewards, transitions, dones = self.replay_buffer.sample(self.batch_size)
         actor_loss, critic_loss, metrics = self.loss_SAC(states, actions, rewards, transitions, dones)
-        
-        self.q_optim.zero_grad()
-        critic_loss.backward(retain_graph=True)
-        self.q_optim.step()
-
-        self.actor_optim.zero_grad()
-        actor_loss.backward()  # retain graph as critic_loss also needs it
-        self.actor_optim.step()
-
-        # for net in self.agent.nets:
-        #     nn.utils.clip_grad_norm_(net.parameters(), cfg.gradnorm_clip)
-
-
-        # action, act_mean, act_std = self.agent.get_action(torch.randn_like(states)) # +++
-        # if action.isnan().any():
-        #     a = 1
 
         self.agent.update_target_nets(cfg.critic_ema_tau)
         return (actor_loss + critic_loss).item(), metrics

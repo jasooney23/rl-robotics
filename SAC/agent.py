@@ -64,8 +64,11 @@ class Agent:
                 act_mean, act_logstd = self.target_actor(state)
             else:
                 act_mean, act_logstd = self.actor(state)
-            act_logstd = utils.TanhClamp(-10, 2)(act_logstd)  # clamp log std to avoid extreme values
+            act_logstd = utils.TanhClamp(*cfg.logstd_range)(act_logstd)  # clamp log std to avoid extreme values
             act_std = torch.exp(act_logstd) + cfg.eps  # add small value to avoid log(0)
+
+            act_mean = utils.TanhClamp(cfg.raw_mean_range[0], cfg.raw_mean_range[1])(act_mean)  # clamp raw mean to avoid extreme values
+
             actions = act_mean + act_std * torch.randn_like(act_mean)
 
             if clamp:
@@ -85,8 +88,7 @@ class Agent:
             action = torch.argmax(act_probs, dim=-1)
 
             return action, act_probs, None
-    
-    
+
     def set_eval(self):
         [net.eval() for net in self.nets]
 
